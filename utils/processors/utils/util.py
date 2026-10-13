@@ -331,34 +331,39 @@ def classify_unresolvable_image(qc, parsed: Dict, rhoai_version: Optional[str] =
     Explain why an image digest could not be resolved against Quay, so the skip
     warning states the real cause instead of a catch-all "cross-tenant" guess.
 
+    This is a best-effort explanation only — it must NEVER raise, since its whole
+    purpose is to let the freeze continue past an unresolvable image.
+
     Order of checks (cheapest first):
       1. Malformed digest — missing or duplicated 'sha256:' prefix in the source
          file (a data bug, not a registry limitation).
-      2. No '<rhoai_version>' tag — the image is not published for this release.
-      3. Tag present, same digest we tried — genuinely cross-tenant/synced image
-         whose per-repo manifest/labels API is not queryable.
-      4. Tag present, different digest — the source file digest is stale; the
-         freeze (tag reconciliation) will fix it.
+      2. Tag present, different digest — the source file digest is stale; the
+         freeze (tag reconciliation) will fix it on a real run.
+      3. Otherwise (tag resolves to the same digest we already failed to query,
+         or the tag/repo itself is not queryable) — a genuinely cross-tenant /
+         synced image, or an orphaned digest. Metadata is maintained out of band.
     """
     digest = parsed.get('digest') or ''
     if not _DIGEST_RE.match(digest):
         return (f"malformed digest '{digest}' (missing or duplicated 'sha256:' prefix) "
                 f"in the source file — fix the reference")
 
+    generic = "manifest/labels not queryable (cross-tenant/synced image or orphaned digest)"
     if not rhoai_version:
-        return "manifest/labels not queryable (cross-tenant/synced image or orphaned digest)"
+        return generic
 
-    tag = qc.get_tag_details(parsed['repo'], rhoai_version)
-    if not tag:
-        return f"no '{rhoai_version}' tag in quay.io/{parsed['org']}/{parsed['repo']} — image not published for this release"
+    try:
+        tag = qc.get_tag_details(parsed['repo'], rhoai_version)
+    except Exception as exc:  # never let classification crash the freeze
+        LOGGER.warning(f"  Tag lookup failed for {parsed['org']}/{parsed['repo']}:{rhoai_version}: {exc}")
+        return generic
 
-    tag_digest = tag.get('manifest_digest', '')
+    tag_digest = tag.get('manifest_digest', '') if tag else ''
     if tag_digest and tag_digest != digest:
         return (f"stale digest in source file; current '{rhoai_version}' tag is {tag_digest} — "
                 f"run the freeze to reconcile")
 
-    return (f"tagged '{rhoai_version}' but its manifest/labels API is not queryable "
-            f"(cross-tenant/synced image)")
+    return generic
 
 
 def fetch_git_metadata_for_existing_digests(image_entries: List[Dict], rhoai_version: Optional[str] = None) -> Dict:

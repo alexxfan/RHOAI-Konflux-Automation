@@ -22,7 +22,10 @@ class quay_controller:
         headers = {'Authorization': f'Bearer {os.environ[self._token_env_var()]}',
                    'Accept': 'application/json'}
         response = requests.get(url, headers=headers)
-        tags = response.json()['tags']
+        payload = response.json()
+        # Error responses (repo not found, cross-tenant repo, auth) carry no
+        # 'tags' key — treat as "no such tag" rather than raising KeyError.
+        tags = payload.get('tags') if isinstance(payload, dict) else None
         if tags:
             result_tag = tags[0]
         return result_tag
