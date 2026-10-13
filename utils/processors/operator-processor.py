@@ -132,12 +132,21 @@ class operator_processor:
         missing_components = []
 
         errors = self.git_labels_meta.get('errors', {})
+        # Components whose manifest was not resolvable (cross-tenant synced images
+        # such as AIPCC llama-stack / RHAII vLLM). Their git metadata is maintained
+        # out of band, so keep whatever is already in manifests-config.yaml.
+        skipped = set(self.git_labels_meta.get('skipped', []))
 
         LOGGER.info("Updating git metadata for operator components...")
         for component, manifest_config in self.manifest_config_dict['map'].items():
             # Skip branch-based components
             if manifest_config.get('ref_type') == 'branch':
                 LOGGER.info(f"  Skipping component '{component}' (ref_type=branch)")
+                continue
+
+            # Keep existing metadata for cross-tenant/unresolvable images
+            if component in skipped:
+                LOGGER.info(f"  Keeping existing git metadata for '{component}' (cross-tenant/unresolvable image)")
                 continue
 
             # Check if component exists in git_labels_meta

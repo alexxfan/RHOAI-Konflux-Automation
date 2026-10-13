@@ -328,7 +328,7 @@ def fetch_git_metadata_for_existing_digests(image_entries: List[Dict]) -> Dict:
     No tag lookup is performed — the manifest digest in each image reference
     is used directly.  Callers are responsible for any pre-filtering.
     """
-    git_labels_meta = {'map': {}}
+    git_labels_meta = {'map': {}, 'skipped': []}
 
     for image_entry in image_entries:
         image_value = str(image_entry['value'])
@@ -338,13 +338,27 @@ def fetch_git_metadata_for_existing_digests(image_entries: List[Dict]) -> Dict:
         qc = quay_controller(parsed['org'])
         manifest_digest = parsed['digest']
 
-        manifest_details = qc.get_manifest_details(parsed['repo'], manifest_digest)
+        # Cross-tenant synced images (AIPCC llama-stack, RHAII vLLM) carry a valid
+        # tag but their per-repo manifest endpoint 404s. Skip them rather than
+        # aborting; their existing git metadata is maintained out of band and must
+        # be preserved by the caller.
+        manifest_details = qc.get_manifest_details(parsed['repo'], manifest_digest, fail_on_error=False)
+        if manifest_details is None:
+            LOGGER.warning(f'  Skipping {parsed["component_name"]}: manifest not resolvable '
+                           f'(cross-tenant/orphaned digest {manifest_digest}). Keeping existing git metadata.')
+            git_labels_meta['skipped'].append(parsed['component_name'])
+            continue
         if manifest_details.get('is_manifest_list'):
             arch_digests = qc.get_image_manifest_digests_for_all_the_supported_archs(parsed['repo'], manifest_digest)
             if arch_digests:
                 manifest_digest = arch_digests[0]
 
-        labels = qc.get_git_labels(parsed['repo'], manifest_digest)
+        labels = qc.get_git_labels(parsed['repo'], manifest_digest, fail_on_error=False)
+        if labels is None:
+            LOGGER.warning(f'  Skipping {parsed["component_name"]}: labels not resolvable '
+                           f'(cross-tenant/orphaned digest {manifest_digest}). Keeping existing git metadata.')
+            git_labels_meta['skipped'].append(parsed['component_name'])
+            continue
         labels = {l['key']: l['value'] for l in labels if l['value']}
 
         git_labels_meta['map'][parsed['component_name']] = {

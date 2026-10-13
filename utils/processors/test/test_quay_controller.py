@@ -1,8 +1,65 @@
 import os
 import sys
+from unittest.mock import patch, MagicMock
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from controller.quay_controller import quay_controller
+
+
+NOT_FOUND = {'detail': 'Not Found', 'error_type': 'not_found', 'status': 404}
+
+
+def _resp(payload):
+    r = MagicMock()
+    r.json.return_value = payload
+    return r
+
+
+class TestManifestDetails404:
+    """Cross-tenant synced images (llama-stack, vLLM) 404 on the per-repo manifest
+    endpoint. fail_on_error=False must return None instead of sys.exit(1)."""
+
+    @patch.dict(os.environ, {'RHOAI_QUAY_API_TOKEN': 'tok'})
+    @patch('controller.quay_controller.requests.get')
+    def test_manifest_404_non_fatal_returns_none(self, mock_get):
+        mock_get.return_value = _resp(NOT_FOUND)
+        qc = quay_controller('rhoai')
+        assert qc.get_manifest_details('odh-llama-stack-core-rhel9', 'sha256:deadbeef', fail_on_error=False) is None
+
+    @patch.dict(os.environ, {'RHOAI_QUAY_API_TOKEN': 'tok'})
+    @patch('controller.quay_controller.requests.get')
+    def test_manifest_404_fatal_by_default(self, mock_get):
+        mock_get.return_value = _resp(NOT_FOUND)
+        qc = quay_controller('rhoai')
+        with pytest.raises(SystemExit):
+            qc.get_manifest_details('odh-llama-stack-core-rhel9', 'sha256:deadbeef')
+
+    @patch.dict(os.environ, {'RHOAI_QUAY_API_TOKEN': 'tok'})
+    @patch('controller.quay_controller.requests.get')
+    def test_manifest_ok_returns_payload(self, mock_get):
+        payload = {'manifest_data': '{}', 'is_manifest_list': False}
+        mock_get.return_value = _resp(payload)
+        qc = quay_controller('rhoai')
+        assert qc.get_manifest_details('odh-dashboard-rhel9', 'sha256:abc', fail_on_error=False) == payload
+
+
+class TestGitLabels404:
+    @patch.dict(os.environ, {'RHOAI_QUAY_API_TOKEN': 'tok'})
+    @patch('controller.quay_controller.requests.get')
+    def test_labels_404_non_fatal_returns_none(self, mock_get):
+        mock_get.return_value = _resp(NOT_FOUND)
+        qc = quay_controller('rhoai')
+        assert qc.get_git_labels('odh-llama-stack-core-rhel9', 'sha256:deadbeef', fail_on_error=False) is None
+
+    @patch.dict(os.environ, {'RHOAI_QUAY_API_TOKEN': 'tok'})
+    @patch('controller.quay_controller.requests.get')
+    def test_labels_404_fatal_by_default(self, mock_get):
+        mock_get.return_value = _resp(NOT_FOUND)
+        qc = quay_controller('rhoai')
+        with pytest.raises(SystemExit):
+            qc.get_git_labels('odh-llama-stack-core-rhel9', 'sha256:deadbeef')
 
 
 class TestTokenEnvVar:

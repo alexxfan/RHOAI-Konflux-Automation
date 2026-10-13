@@ -59,7 +59,7 @@ class quay_controller:
                 image_manifest_digests.append(manifest['digest'])
         return image_manifest_digests
 
-    def get_manifest_details(self, repo, manifest_digest):
+    def get_manifest_details(self, repo, manifest_digest, fail_on_error=True):
         url = f'{BASE_URL}/repository/{self.org}/{repo}/manifest/{manifest_digest}'
         headers = {'Authorization': f'Bearer {os.environ[self._token_env_var()]}',
                    'Accept': 'application/json'}
@@ -67,11 +67,17 @@ class quay_controller:
 
         if 'manifest_data' in response.json():
             return response.json()
-        else:
-            LOGGER.error(f'Failed to get manifest details: {response.json()}')
-            sys.exit(1)
+        # Cross-tenant synced images (e.g. AIPCC llama-stack, RHAII vLLM) carry a
+        # valid tag in quay.io/rhoai but their per-repo manifest endpoint can 404.
+        # Callers that can tolerate a missing manifest pass fail_on_error=False and
+        # handle the None return themselves.
+        if not fail_on_error:
+            LOGGER.warning(f'Manifest not resolvable for {self.org}/{repo}@{manifest_digest}: {response.json()}')
+            return None
+        LOGGER.error(f'Failed to get manifest details: {response.json()}')
+        sys.exit(1)
 
-    def get_git_labels(self, repo, tag):
+    def get_git_labels(self, repo, tag, fail_on_error=True):
         url = f'{BASE_URL}/repository/{self.org}/{repo}/manifest/{tag}/labels'
         # ?filter=git, throwing 403 forbidden, due to this need to check, seems quay issue, disabling the fitler for now
         headers = {'Authorization': f'Bearer {os.environ[self._token_env_var()]}',
@@ -80,6 +86,8 @@ class quay_controller:
         if 'labels' in response.json():
             labels = response.json()['labels']
             return labels
-        else:
-            LOGGER.error(f'Failed to get git labels: {response.json()}')
-            sys.exit(1)
+        if not fail_on_error:
+            LOGGER.warning(f'Labels not resolvable for {self.org}/{repo}@{tag}: {response.json()}')
+            return None
+        LOGGER.error(f'Failed to get git labels: {response.json()}')
+        sys.exit(1)
