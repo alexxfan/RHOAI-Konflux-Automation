@@ -3,6 +3,7 @@ Shared utility functions for RHOAI processors.
 """
 
 import os
+import re
 import subprocess
 import sys
 import json
@@ -322,13 +323,55 @@ def fetch_latest_images_and_git_metadata(
 
 
 
-def fetch_git_metadata_for_existing_digests(image_entries: List[Dict]) -> Dict:
+_DIGEST_RE = re.compile(r'^sha256:[a-f0-9]{64}$')
+
+
+def classify_unresolvable_image(qc, parsed: Dict, rhoai_version: Optional[str] = None) -> str:
+    """
+    Explain why an image digest could not be resolved against Quay, so the skip
+    warning states the real cause instead of a catch-all "cross-tenant" guess.
+
+    Order of checks (cheapest first):
+      1. Malformed digest — missing or duplicated 'sha256:' prefix in the source
+         file (a data bug, not a registry limitation).
+      2. No '<rhoai_version>' tag — the image is not published for this release.
+      3. Tag present, same digest we tried — genuinely cross-tenant/synced image
+         whose per-repo manifest/labels API is not queryable.
+      4. Tag present, different digest — the source file digest is stale; the
+         freeze (tag reconciliation) will fix it.
+    """
+    digest = parsed.get('digest') or ''
+    if not _DIGEST_RE.match(digest):
+        return (f"malformed digest '{digest}' (missing or duplicated 'sha256:' prefix) "
+                f"in the source file — fix the reference")
+
+    if not rhoai_version:
+        return "manifest/labels not queryable (cross-tenant/synced image or orphaned digest)"
+
+    tag = qc.get_tag_details(parsed['repo'], rhoai_version)
+    if not tag:
+        return f"no '{rhoai_version}' tag in quay.io/{parsed['org']}/{parsed['repo']} — image not published for this release"
+
+    tag_digest = tag.get('manifest_digest', '')
+    if tag_digest and tag_digest != digest:
+        return (f"stale digest in source file; current '{rhoai_version}' tag is {tag_digest} — "
+                f"run the freeze to reconcile")
+
+    return (f"tagged '{rhoai_version}' but its manifest/labels API is not queryable "
+            f"(cross-tenant/synced image)")
+
+
+def fetch_git_metadata_for_existing_digests(image_entries: List[Dict], rhoai_version: Optional[str] = None) -> Dict:
     """
     Fetch git labels from Quay using the existing digest in each image entry.
     No tag lookup is performed — the manifest digest in each image reference
     is used directly.  Callers are responsible for any pre-filtering.
+
+    Images whose manifest/labels cannot be resolved (cross-tenant synced images,
+    malformed or stale digests) are recorded under 'skipped' with a human-readable
+    reason instead of aborting; the caller must preserve their existing metadata.
     """
-    git_labels_meta = {'map': {}, 'skipped': []}
+    git_labels_meta = {'map': {}, 'skipped': {}}
 
     for image_entry in image_entries:
         image_value = str(image_entry['value'])
@@ -338,15 +381,11 @@ def fetch_git_metadata_for_existing_digests(image_entries: List[Dict]) -> Dict:
         qc = quay_controller(parsed['org'])
         manifest_digest = parsed['digest']
 
-        # Cross-tenant synced images (AIPCC llama-stack, RHAII vLLM) carry a valid
-        # tag but their per-repo manifest endpoint 404s. Skip them rather than
-        # aborting; their existing git metadata is maintained out of band and must
-        # be preserved by the caller.
         manifest_details = qc.get_manifest_details(parsed['repo'], manifest_digest, fail_on_error=False)
         if manifest_details is None:
-            LOGGER.warning(f'  Skipping {parsed["component_name"]}: manifest not resolvable '
-                           f'(cross-tenant/orphaned digest {manifest_digest}). Keeping existing git metadata.')
-            git_labels_meta['skipped'].append(parsed['component_name'])
+            reason = classify_unresolvable_image(qc, parsed, rhoai_version)
+            LOGGER.warning(f'  Skipping {parsed["component_name"]}: {reason}. Keeping existing git metadata.')
+            git_labels_meta['skipped'][parsed['component_name']] = reason
             continue
         if manifest_details.get('is_manifest_list'):
             arch_digests = qc.get_image_manifest_digests_for_all_the_supported_archs(parsed['repo'], manifest_digest)
@@ -355,9 +394,9 @@ def fetch_git_metadata_for_existing_digests(image_entries: List[Dict]) -> Dict:
 
         labels = qc.get_git_labels(parsed['repo'], manifest_digest, fail_on_error=False)
         if labels is None:
-            LOGGER.warning(f'  Skipping {parsed["component_name"]}: labels not resolvable '
-                           f'(cross-tenant/orphaned digest {manifest_digest}). Keeping existing git metadata.')
-            git_labels_meta['skipped'].append(parsed['component_name'])
+            reason = classify_unresolvable_image(qc, parsed, rhoai_version)
+            LOGGER.warning(f'  Skipping {parsed["component_name"]}: {reason}. Keeping existing git metadata.')
+            git_labels_meta['skipped'][parsed['component_name']] = reason
             continue
         labels = {l['key']: l['value'] for l in labels if l['value']}
 

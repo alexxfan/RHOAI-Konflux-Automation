@@ -63,7 +63,7 @@ class operator_processor:
                 self.operands_map_dict['relatedImages'],
                 exclude_filter=['FBC', 'BUNDLE', 'ODH_OPERATOR']
             )
-            self.git_labels_meta = util.fetch_git_metadata_for_existing_digests(filtered)
+            self.git_labels_meta = util.fetch_git_metadata_for_existing_digests(filtered, self.rhoai_version)
             self.latest_images = None
         else:
             LOGGER.info("")
@@ -132,10 +132,10 @@ class operator_processor:
         missing_components = []
 
         errors = self.git_labels_meta.get('errors', {})
-        # Components whose manifest was not resolvable (cross-tenant synced images
-        # such as AIPCC llama-stack / RHAII vLLM). Their git metadata is maintained
-        # out of band, so keep whatever is already in manifests-config.yaml.
-        skipped = set(self.git_labels_meta.get('skipped', []))
+        # Components whose manifest/labels were not resolvable (cross-tenant synced
+        # images, malformed or stale digests). Maps component -> reason. Their git
+        # metadata is maintained out of band, so keep what is in manifests-config.yaml.
+        skipped = self.git_labels_meta.get('skipped', {})
 
         LOGGER.info("Updating git metadata for operator components...")
         for component, manifest_config in self.manifest_config_dict['map'].items():
@@ -146,7 +146,7 @@ class operator_processor:
 
             # Keep existing metadata for cross-tenant/unresolvable images
             if component in skipped:
-                LOGGER.info(f"  Keeping existing git metadata for '{component}' (cross-tenant/unresolvable image)")
+                LOGGER.info(f"  Keeping existing git metadata for '{component}' ({skipped[component]})")
                 continue
 
             # Check if component exists in git_labels_meta
