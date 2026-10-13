@@ -62,6 +62,33 @@ class TestGitLabels404:
             qc.get_git_labels('odh-llama-stack-core-rhel9', 'sha256:deadbeef')
 
 
+class TestGetTagDetails:
+    """An error response (repo not found, cross-tenant repo, auth) carries no
+    'tags' key. get_tag_details must return {} instead of raising KeyError."""
+
+    @patch.dict(os.environ, {'RHOAI_QUAY_API_TOKEN': 'tok'})
+    @patch('controller.quay_controller.requests.get')
+    def test_error_payload_returns_empty(self, mock_get):
+        mock_get.return_value = _resp(NOT_FOUND)
+        qc = quay_controller('rhoai')
+        assert qc.get_tag_details('odh-llm-d-batch-gateway-apiserver', 'rhoai-3.4') == {}
+
+    @patch.dict(os.environ, {'RHOAI_QUAY_API_TOKEN': 'tok'})
+    @patch('controller.quay_controller.requests.get')
+    def test_empty_tags_returns_empty(self, mock_get):
+        mock_get.return_value = _resp({'tags': []})
+        qc = quay_controller('rhoai')
+        assert qc.get_tag_details('odh-dashboard-rhel9', 'rhoai-3.4') == {}
+
+    @patch.dict(os.environ, {'RHOAI_QUAY_API_TOKEN': 'tok'})
+    @patch('controller.quay_controller.requests.get')
+    def test_tag_present_returns_first(self, mock_get):
+        tag = {'name': 'rhoai-3.4', 'manifest_digest': 'sha256:' + 'a' * 64}
+        mock_get.return_value = _resp({'tags': [tag]})
+        qc = quay_controller('rhoai')
+        assert qc.get_tag_details('odh-dashboard-rhel9', 'rhoai-3.4') == tag
+
+
 class TestTokenEnvVar:
     def test_simple_org(self):
         qc = quay_controller('opendatahub')
