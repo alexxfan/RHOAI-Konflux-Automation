@@ -5,11 +5,59 @@ Utilities for downloading SBOMs from container image registries using cosign.
 import json
 import re
 import subprocess
+import time
 from typing import Dict, List, Optional, Union
 
 from logger.logger import getLogger
 
 LOGGER = getLogger('sbom')
+
+_REGISTRY_RETRY_ATTEMPTS = 5
+_REGISTRY_RETRY_INITIAL_DELAY_S = 1
+
+
+def _is_transient_registry_error(stderr: str) -> bool:
+    """True when registry auth or proxy errors are likely temporary."""
+    if not stderr:
+        return False
+    lowered = stderr.lower()
+    return (
+        '503' in stderr
+        or '502' in stderr
+        or '429' in stderr
+        or 'service unavailable' in lowered
+        or 'bad gateway' in lowered
+        or 'too many requests' in lowered
+    )
+
+
+def _registry_retry_delay_s(attempt: int) -> float:
+    return _REGISTRY_RETRY_INITIAL_DELAY_S * (2 ** (attempt - 1))
+
+
+def _run_registry_command(cmd: List[str], timeout: int, image_uri: str, tool: str) -> subprocess.CompletedProcess:
+    """
+    Run skopeo/cosign with retries on transient registry HTTP failures (e.g. 503).
+    """
+    last_result: Optional[subprocess.CompletedProcess] = None
+    for attempt in range(1, _REGISTRY_RETRY_ATTEMPTS + 1):
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        last_result = result
+        if result.returncode == 0:
+            return result
+
+        stderr = result.stderr or ''
+        if _is_transient_registry_error(stderr) and attempt < _REGISTRY_RETRY_ATTEMPTS:
+            LOGGER.warning(
+                f"{tool} transient registry error for {image_uri} "
+                f"(attempt {attempt}/{_REGISTRY_RETRY_ATTEMPTS}): {stderr.strip()}"
+            )
+            time.sleep(_registry_retry_delay_s(attempt))
+            continue
+        return result
+
+    assert last_result is not None
+    return last_result
 
 
 def download_sbom(image_uri: str, all_arches: bool = True) -> Union[Dict, Dict[str, Dict]]:
@@ -135,9 +183,11 @@ def get_package_info(image_uri: str, package_name: str) -> Dict[str, str]:
 def _cosign_download_sbom(image_uri: str) -> Optional[Dict]:
     """Run cosign download sbom and return parsed JSON, or None on failure."""
     try:
-        result = subprocess.run(
+        result = _run_registry_command(
             ['cosign', 'download', 'sbom', image_uri],
-            capture_output=True, text=True, timeout=120
+            timeout=120,
+            image_uri=image_uri,
+            tool='cosign download sbom',
         )
         if result.returncode != 0:
             LOGGER.debug(f"cosign download sbom failed: {result.stderr.strip()}")
@@ -160,9 +210,11 @@ def _get_arch_digests(image_uri: str) -> List[tuple]:
         List of (architecture, digest) tuples, or empty list if not a manifest list.
     """
     try:
-        result = subprocess.run(
+        result = _run_registry_command(
             ['skopeo', 'inspect', '--raw', f'docker://{image_uri}'],
-            capture_output=True, text=True, timeout=60
+            timeout=60,
+            image_uri=image_uri,
+            tool='skopeo inspect --raw',
         )
         if result.returncode != 0:
             LOGGER.warning(f"skopeo inspect --raw failed (exit {result.returncode}) for {image_uri}: "

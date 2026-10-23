@@ -395,6 +395,41 @@ class TestTagStripping:
 # _get_arch_digests error logging
 # ============================================================================
 
+class TestRegistryRetries:
+
+    @patch('utils.sbom.time.sleep')
+    @patch('utils.sbom.subprocess.run')
+    def test_cosign_retries_on_503(self, mock_run, mock_sleep):
+        sbom = make_sbom([make_package('vllm', '0.17.1')])
+        transient = mock_subprocess_result(
+            returncode=1,
+            stderr='Requesting bearer token: received unexpected HTTP status: 503 Service Unavailable',
+        )
+        success = mock_subprocess_result(stdout=json.dumps(sbom))
+        mock_run.side_effect = [transient, success]
+
+        result = download_sbom(IMAGE, all_arches=False)
+
+        assert result['spdxVersion'] == 'SPDX-2.3'
+        assert mock_run.call_count == 2
+        mock_sleep.assert_called_once_with(1)
+
+    @patch('utils.sbom.time.sleep')
+    @patch('utils.sbom.subprocess.run')
+    def test_get_arch_digests_retries_on_503(self, mock_run, mock_sleep):
+        manifest_list = make_manifest_list([('amd64', 'aaa')])
+        mock_run.side_effect = [
+            mock_subprocess_result(returncode=1, stderr='503 Service Unavailable'),
+            mock_subprocess_result(stdout=json.dumps(manifest_list)),
+        ]
+
+        result = _get_arch_digests(IMAGE)
+
+        assert result == [('amd64', 'sha256:aaa')]
+        assert mock_run.call_count == 2
+        mock_sleep.assert_called_once_with(1)
+
+
 class TestGetArchDigestsLogging:
 
     @patch('utils.sbom.subprocess.run')
