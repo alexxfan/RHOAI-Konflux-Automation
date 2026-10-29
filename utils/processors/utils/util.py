@@ -366,9 +366,10 @@ def classify_unresolvable_image(qc, parsed: Dict, rhoai_version: Optional[str] =
     return generic
 
 
-def fetch_git_metadata_for_existing_digests(image_entries: List[Dict], rhoai_version: Optional[str] = None) -> Dict:
+def fetch_git_metadata_for_existing_digests(image_entries: List[Dict], rhoai_version: Optional[str] = None, registry_auth_file: Optional[str] = None) -> Dict:
     """
     Fetch git labels from Quay using the existing digest in each image entry.
+    With registry_auth_file, read OCI labels through Skopeo instead of the Quay API.
     No tag lookup is performed — the manifest digest in each image reference
     is used directly.  Callers are responsible for any pre-filtering.
 
@@ -382,6 +383,36 @@ def fetch_git_metadata_for_existing_digests(image_entries: List[Dict], rhoai_ver
         image_value = str(image_entry['value'])
         parsed = parse_image_value(image_value)
         LOGGER.info(f'  Processing (existing digest): {parsed["org"]}/{parsed["repo"]}')
+
+        if registry_auth_file is not None:
+            # Inspect the pinned digest, never a mutable tag. Skopeo reads the
+            # existing robot auth file; no credential is passed on its command line.
+            try:
+                if not re.fullmatch(r'sha256:[0-9a-fA-F]{64}', parsed['digest']):
+                    raise ValueError('operator image must contain a valid sha256 digest')
+                result = subprocess.run(
+                    ['skopeo', 'inspect', '--authfile', registry_auth_file,
+                     '--no-tags', '--override-os', 'linux', '--override-arch', 'amd64',
+                     'docker://' + image_value],
+                    check=True, capture_output=True, text=True, timeout=120,
+                )
+                metadata = json.loads(result.stdout)
+                if metadata.get('Digest') != parsed['digest']:
+                    raise ValueError('registry returned a different manifest digest')
+                labels = metadata.get('Labels') or {}
+                git_metadata = {key: labels.get(key, '') for key in
+                                (CONSTANTS.GIT_URL_LABEL_KEY, CONSTANTS.GIT_COMMIT_LABEL_KEY)}
+                if not all(isinstance(value, str) and value.strip() for value in git_metadata.values()):
+                    raise ValueError('required git.url/git.commit labels are missing or empty')
+            except (OSError, subprocess.SubprocessError, ValueError, AttributeError, TypeError) as exc:
+                # Do not log stderr or auth-file contents, which may contain credentials.
+                reason = ('registry inspection failed; verify Skopeo, registry pull access, '
+                          'the pinned digest, and git.url/git.commit labels')
+                LOGGER.warning(f'  Skipping {parsed["component_name"]}: {reason} ({type(exc).__name__})')
+                git_labels_meta['skipped'][parsed['component_name']] = reason
+            else:
+                git_labels_meta['map'][parsed['component_name']] = git_metadata
+            continue
 
         qc = quay_controller(parsed['org'])
         manifest_digest = parsed['digest']

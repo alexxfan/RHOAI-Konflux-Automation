@@ -58,3 +58,16 @@ uv run --extra test pytest test/test_sbom.py -v
 The test clones RHOAI-Build-Config once (blobless, cached in `/tmp/rhoai-test-rbc-cache`), creates worktrees for each commit pair, and compares the processor output against the known-good CSV. The operator tag resolution is pinned so tests are deterministic despite mutable Quay tags.
 
 To add a new regression test case, find a "Updating the bundle-csv" commit on the target branch and add its input/output SHA pair to `RELEASE_TEST_CASES`.
+
+
+## Private operator metadata without a Quay API token
+
+The bundle processor accepts `--registry-auth-file <docker-config-json>` together
+with `--use-existing-digests`. With this opt-in, Skopeo reads the pinned operator
+image's OCI `git.url` and `git.commit` labels using registry credentials, without
+calling the Quay management API. Skopeo must be on PATH. Credentials stay in the
+auth file, not CLI arguments. Other callers retain the existing API behavior.
+
+`test_bundle_registry_metadata.py` covers this path, denied/missing tools and
+metadata, preservation of the pinned digest, API compatibility, the empty-map
+regression, and a complete offline bundle-processing run.

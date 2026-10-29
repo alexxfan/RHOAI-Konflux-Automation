@@ -19,7 +19,7 @@ LOGGER = getLogger('processor')
 
 class bundle_processor:
 
-    def __init__(self, build_config_path:str, bundle_csv_path:str, patch_yaml_path:str, rhoai_version:str, output_file_path:str, annotation_yaml_path:str, push_pipeline_operation:str, push_pipeline_yaml_path:str, build_type:str, xks_helm_patch_yaml_path:str=None, xks_helm_values_yaml_path:str=None, xks_helm_push_pipeline_yaml_path:str=None, openshift_helm_patch_yaml_path:str=None, openshift_helm_values_yaml_path:str=None, openshift_helm_push_pipeline_yaml_path:str=None, metadata_config_yaml_path:str=None, use_existing_digests:bool=False):
+    def __init__(self, build_config_path:str, bundle_csv_path:str, patch_yaml_path:str, rhoai_version:str, output_file_path:str, annotation_yaml_path:str, push_pipeline_operation:str, push_pipeline_yaml_path:str, build_type:str, xks_helm_patch_yaml_path:str=None, xks_helm_values_yaml_path:str=None, xks_helm_push_pipeline_yaml_path:str=None, openshift_helm_patch_yaml_path:str=None, openshift_helm_values_yaml_path:str=None, openshift_helm_push_pipeline_yaml_path:str=None, metadata_config_yaml_path:str=None, use_existing_digests:bool=False, registry_auth_file:str=None):
         LOGGER.info("=============================================================================")
         LOGGER.info("Initializing Bundle Processor")
         LOGGER.info("=============================================================================")
@@ -43,6 +43,9 @@ class bundle_processor:
         self.openshift_helm_chart_yaml_path = str(Path(openshift_helm_values_yaml_path).parent / 'Chart.yaml') if openshift_helm_values_yaml_path else None
         self.metadata_config_yaml_path = metadata_config_yaml_path
         self.use_existing_digests = use_existing_digests
+        self.registry_auth_file = registry_auth_file
+        if registry_auth_file and not use_existing_digests:
+            raise ValueError('--registry-auth-file requires --use-existing-digests')
 
         LOGGER.info(f"rhoai_version: {self.rhoai_version}")
         LOGGER.info(f"build_type: {self.build_type}")
@@ -127,8 +130,18 @@ class bundle_processor:
         LOGGER.info("Fetching ODH Operator Metadata...")
         LOGGER.info("=============================================================================")
         self.operator_image_entry, self.operator_git_metadata = self.fetch_operator_metadata()
-        # Extract operator git metadata. fetch_operator_metadata() validates exactly one
-        # ODH_OPERATOR entry exists, so we can safely access the first key here.
+        # One image entry does not guarantee one readable metadata result.
+        metadata = self.operator_git_metadata.get('map', {})
+        if len(metadata) != 1 or not all(
+            isinstance(labels.get(key), str) and labels[key].strip()
+            for labels in metadata.values()
+            for key in (CONSTANTS.GIT_URL_LABEL_KEY, CONSTANTS.GIT_COMMIT_LABEL_KEY)
+        ):
+            raise ValueError(
+                'Cannot read required operator git metadata. Verify registry pull access '
+                'with --registry-auth-file, or Quay API authentication, and ensure the '
+                'pinned image contains git.url and git.commit labels.'
+            )
         self.operator_name = list(self.operator_git_metadata["map"].keys())[0]
         self.operator_git_url = self.operator_git_metadata["map"][self.operator_name][CONSTANTS.GIT_URL_LABEL_KEY]
         self.operator_git_commit = self.operator_git_metadata["map"][self.operator_name][CONSTANTS.GIT_COMMIT_LABEL_KEY]
@@ -257,7 +270,12 @@ class bundle_processor:
         if self.use_existing_digests:
             LOGGER.info("")
             LOGGER.info("--use-existing-digests: Skipping Quay tag lookup, fetching git metadata by digest...")
-            operator_git_metadata = util.fetch_git_metadata_for_existing_digests(odh_operator_entry)
+            if self.registry_auth_file:
+                LOGGER.info('Reading pinned operator OCI labels with registry authentication')
+                operator_git_metadata = util.fetch_git_metadata_for_existing_digests(
+                    odh_operator_entry, registry_auth_file=self.registry_auth_file)
+            else:
+                operator_git_metadata = util.fetch_git_metadata_for_existing_digests(odh_operator_entry)
             return odh_operator_entry, operator_git_metadata
         else:
             LOGGER.info("")
@@ -877,6 +895,9 @@ if __name__ == '__main__':
     parser.add_argument('--use-existing-digests', action='store_true', default=False,
                         help='Preserve existing operator image digest instead of querying Quay for latest tag. Used for embargo builds.',
                         dest='use_existing_digests')
+    parser.add_argument('--registry-auth-file', required=False,
+                        help='Registry auth file for OCI git labels with --use-existing-digests; bypasses the Quay management API.',
+                        dest='registry_auth_file')
     # For POC purposes: snapshot_processor arguments
     parser.add_argument('-sn', '--snapshot-json-path', required=False,
                         help='Path of the single-bundle generated using the opm.', dest='snapshot_json_path')
@@ -885,7 +906,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.operation.lower() == 'bundle-patch':
-        processor = bundle_processor(build_config_path=args.build_config_path, bundle_csv_path=args.bundle_csv_path, patch_yaml_path=args.patch_yaml_path, rhoai_version=args.rhoai_version, output_file_path=args.output_file_path, annotation_yaml_path=args.annotation_yaml_path, push_pipeline_operation=args.push_pipeline_operation, push_pipeline_yaml_path=args.push_pipeline_yaml_path, build_type=args.build_type, xks_helm_patch_yaml_path=args.xks_helm_patch_yaml_path, xks_helm_values_yaml_path=args.xks_helm_values_yaml_path, xks_helm_push_pipeline_yaml_path=args.xks_helm_push_pipeline_yaml_path, openshift_helm_patch_yaml_path=args.openshift_helm_patch_yaml_path, openshift_helm_values_yaml_path=args.openshift_helm_values_yaml_path, openshift_helm_push_pipeline_yaml_path=args.openshift_helm_push_pipeline_yaml_path, metadata_config_yaml_path=args.metadata_config_yaml_path, use_existing_digests=args.use_existing_digests)
+        processor = bundle_processor(build_config_path=args.build_config_path, bundle_csv_path=args.bundle_csv_path, patch_yaml_path=args.patch_yaml_path, rhoai_version=args.rhoai_version, output_file_path=args.output_file_path, annotation_yaml_path=args.annotation_yaml_path, push_pipeline_operation=args.push_pipeline_operation, push_pipeline_yaml_path=args.push_pipeline_yaml_path, build_type=args.build_type, xks_helm_patch_yaml_path=args.xks_helm_patch_yaml_path, xks_helm_values_yaml_path=args.xks_helm_values_yaml_path, xks_helm_push_pipeline_yaml_path=args.xks_helm_push_pipeline_yaml_path, openshift_helm_patch_yaml_path=args.openshift_helm_patch_yaml_path, openshift_helm_values_yaml_path=args.openshift_helm_values_yaml_path, openshift_helm_push_pipeline_yaml_path=args.openshift_helm_push_pipeline_yaml_path, metadata_config_yaml_path=args.metadata_config_yaml_path, use_existing_digests=args.use_existing_digests, registry_auth_file=args.registry_auth_file)
         processor.process()
 
     # build_config_path = '/home/dchouras/RHODS/DevOps/RHOAI-Build-Config/config/build-config.yaml'
