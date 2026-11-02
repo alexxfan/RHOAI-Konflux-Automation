@@ -69,7 +69,7 @@ class operator_processor:
                 exclude_filter=['FBC', 'BUNDLE', 'ODH_OPERATOR'],
             )
             # Anything the snapshot does not cover (operator/FBC/BUNDLE, components
-            # absent from the snapshot, or an image parked in a shared repo) falls
+            # absent from the snapshot) falls
             # back to the normal Quay lookup against the release tag.
             if unresolved:
                 LOGGER.info("")

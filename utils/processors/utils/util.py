@@ -788,14 +788,11 @@ def fetch_images_and_git_metadata_from_snapshot(
     snapshot produced by the early-gate generate-snapshot task, instead of querying
     Quay.io for the release tag.
 
-    The snapshot is the authoritative record of which image (PR build or rhoai-X.Y
-    fallback) the gate chose for each component. Matching is by image repository
-    basename (e.g. 'odh-dashboard-rhel9') - the same key the bundle injection
-    (update-group-snapshot) uses - so a component is pinned from the snapshot only
-    when the snapshot's image is in the component's own repository. Anything the
-    snapshot does not cover (the operator/FBC/BUNDLE entries, components absent from
-    the snapshot, or an image parked in a shared repo whose basename does not match)
-    is returned as unresolved so the caller can fall back to the normal Quay lookup.
+    The snapshot is authoritative for both the repository and digest selected by
+    the gate. Match its component key (without the release suffix) first, including
+    images in a shared PR repository. Repository-basename matching remains a
+    compatibility fallback for keys that differ from the operand component name.
+    Ambiguous matches fail rather than selecting an arbitrary component.
 
     Unlike the Quay lookup, this does NOT require a cosign signature and performs no
     registry calls: the snapshot already carries the resolved digest and git labels.
@@ -815,20 +812,24 @@ def fetch_images_and_git_metadata_from_snapshot(
     """
     exclude_filter = exclude_filter or []
 
-    # Index the snapshot by image repository basename, e.g. 'odh-dashboard-rhel9'.
-    snapshot_by_repo: Dict[str, Dict] = {}
+    snapshot_by_component: Dict[str, List[Dict]] = {}
+    snapshot_by_repo: Dict[str, List[Dict]] = {}
     for component, meta in (snapshot or {}).items():
         image = (meta or {}).get('image', '') or ''
         if '@' not in image:
             continue
-        base, digest = image.split('@', 1)
+        base = image.split('@', 1)[0]
         repo_basename = base.rsplit('/', 1)[-1]
-        snapshot_by_repo[repo_basename] = {
-            'digest': digest,
+        # resolve-group-configuration appends -vX-Y or -vX-Y-ea-N.
+        component_name = re.sub(r'-v[0-9]+-[0-9]+(?:-ea-[0-9]+)?$', '', component)
+        record = {
+            'image': image,
             CONSTANTS.GIT_URL_LABEL_KEY: meta.get(CONSTANTS.GIT_URL_LABEL_KEY, ''),
             CONSTANTS.GIT_COMMIT_LABEL_KEY: meta.get(CONSTANTS.GIT_COMMIT_LABEL_KEY, ''),
         }
-    LOGGER.info(f"Snapshot carries {len(snapshot_by_repo)} component image(s) indexed by repo basename")
+        snapshot_by_component.setdefault(component_name, []).append(record)
+        snapshot_by_repo.setdefault(repo_basename, []).append(record)
+    LOGGER.info(f"Snapshot carries {len(snapshot_by_component)} component image(s)")
 
     resolved_images: List[Dict] = []
     git_labels_meta: Dict = {'map': {}, 'errors': {}}
@@ -847,13 +848,17 @@ def fetch_images_and_git_metadata_from_snapshot(
         repo_basename = parsed['repo'].rsplit('/', 1)[-1]
         component_name = parsed['component_name']
 
-        snap = snapshot_by_repo.get(repo_basename)
-        if not snap:
+        matches = snapshot_by_component.get(component_name) or snapshot_by_repo.get(repo_basename, [])
+        if len(matches) > 1:
+            raise ValueError(f"Ambiguous snapshot images for operand '{name}' ({component_name})")
+        if not matches:
             LOGGER.debug(f"  No snapshot match for '{name}' (repo '{repo_basename}'); deferring to fallback")
             unresolved_entries.append(image_entry)
             continue
 
-        value = f"{parsed['registry']}/{parsed['org']}/{parsed['repo']}@{snap['digest']}"
+        snap = matches[0]
+        # A shared-repository digest may not exist in the operand's release repo.
+        value = snap['image']
         updated_entry = dict(image_entry)
         updated_entry['value'] = DoubleQuotedScalarString(value)
         resolved_images.append(updated_entry)
